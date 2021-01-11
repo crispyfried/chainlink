@@ -3,7 +3,6 @@ package offchainreporting
 import (
 	"context"
 	"fmt"
-	"net/url"
 	"strings"
 	"time"
 
@@ -18,8 +17,6 @@ import (
 	"github.com/smartcontractkit/chainlink/core/services/eth"
 	"github.com/smartcontractkit/chainlink/core/services/job"
 	"github.com/smartcontractkit/chainlink/core/services/log"
-	"github.com/smartcontractkit/chainlink/core/services/synchronization"
-	"github.com/smartcontractkit/chainlink/core/services/telemetry"
 	"github.com/smartcontractkit/chainlink/core/store/orm"
 	"github.com/smartcontractkit/chainlink/core/utils"
 	"github.com/smartcontractkit/libocr/gethwrappers/offchainaggregator"
@@ -108,25 +105,6 @@ func (d jobSpawnerDelegate) ServicesForSpec(jobSpec job.SpecDB) (services []job.
 		d.jobORM.RecordError(context.Background(), jobSpec.ID, msg)
 	})
 
-	var endpointURL *url.URL
-	if me := d.config.OCRMonitoringEndpoint(concreteSpec.MonitoringEndpoint); me != "" {
-		endpointURL, err = url.Parse(me)
-		if err != nil {
-			return nil, errors.Wrapf(err, "invalid monitoring url: %s", me)
-		}
-	} else {
-		endpointURL = d.config.ExplorerURL()
-	}
-
-	var monitoringEndpoint ocrtypes.MonitoringEndpoint
-	if endpointURL != nil {
-		client := synchronization.NewExplorerClient(endpointURL, d.config.ExplorerAccessKey(), d.config.ExplorerSecret())
-		monitoringEndpoint = telemetry.NewAgent(client)
-		services = append(services, client)
-	} else {
-		monitoringEndpoint = ocrtypes.MonitoringEndpoint(nil)
-	}
-
 	lc := ocrtypes.LocalConfig{
 		BlockchainTimeout:                      d.config.OCRBlockchainTimeout(time.Duration(concreteSpec.BlockchainTimeout)),
 		ContractConfigConfirmations:            d.config.OCRContractConfirmations(concreteSpec.ContractConfigConfirmations),
@@ -154,7 +132,6 @@ func (d jobSpawnerDelegate) ServicesForSpec(jobSpec job.SpecDB) (services []job.
 			Database:              NewDB(d.db.DB(), concreteSpec.ID),
 			LocalConfig:           lc,
 			Logger:                ocrLogger,
-			MonitoringEndpoint:    monitoringEndpoint,
 		})
 		if err != nil {
 			return nil, errors.Wrap(err, "error calling NewBootstrapNode")
@@ -192,7 +169,6 @@ func (d jobSpawnerDelegate) ServicesForSpec(jobSpec job.SpecDB) (services []job.
 			ContractConfigTracker:        ocrContract,
 			PrivateKeys:                  &ocrkey,
 			BinaryNetworkEndpointFactory: peerWrapper.Peer,
-			MonitoringEndpoint:           monitoringEndpoint,
 			Logger:                       ocrLogger,
 			Bootstrappers:                bootstrapPeers,
 		})
