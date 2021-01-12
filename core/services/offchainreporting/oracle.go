@@ -25,14 +25,15 @@ import (
 )
 
 type jobSpawnerDelegate struct {
-	db             *gorm.DB
-	jobORM         job.ORM
-	config         *orm.Config
-	keyStore       *KeyStore
-	pipelineRunner pipeline.Runner
-	ethClient      eth.Client
-	logBroadcaster log.Broadcaster
-	peerWrapper    *SingletonPeerWrapper
+	db                 *gorm.DB
+	jobORM             job.ORM
+	config             *orm.Config
+	keyStore           *KeyStore
+	pipelineRunner     pipeline.Runner
+	ethClient          eth.Client
+	logBroadcaster     log.Broadcaster
+	peerWrapper        *SingletonPeerWrapper
+	monitoringEndpoint ocrtypes.MonitoringEndpoint
 }
 
 func NewJobSpawnerDelegate(
@@ -44,8 +45,9 @@ func NewJobSpawnerDelegate(
 	ethClient eth.Client,
 	logBroadcaster log.Broadcaster,
 	peerWrapper *SingletonPeerWrapper,
+	monitoringEndpoint ocrtypes.MonitoringEndpoint,
 ) *jobSpawnerDelegate {
-	return &jobSpawnerDelegate{db, jobORM, config, keyStore, pipelineRunner, ethClient, logBroadcaster, peerWrapper}
+	return &jobSpawnerDelegate{db, jobORM, config, keyStore, pipelineRunner, ethClient, logBroadcaster, peerWrapper, monitoringEndpoint}
 }
 
 func (d jobSpawnerDelegate) JobType() job.Type {
@@ -171,6 +173,7 @@ func (d jobSpawnerDelegate) ServicesForSpec(jobSpec job.SpecDB) (services []job.
 			BinaryNetworkEndpointFactory: peerWrapper.Peer,
 			Logger:                       ocrLogger,
 			Bootstrappers:                bootstrapPeers,
+			MonitoringEndpoint:           d.monitoringEndpoint,
 		})
 		if err != nil {
 			return nil, errors.Wrap(err, "error calling NewOracle")

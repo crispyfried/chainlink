@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/smartcontractkit/chainlink/core/services/job"
+	"github.com/smartcontractkit/chainlink/core/services/telemetry"
 
 	"gopkg.in/guregu/null.v4"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/smartcontractkit/chainlink/core/services/offchainreporting"
 	"github.com/smartcontractkit/chainlink/core/store/models"
 	"github.com/smartcontractkit/chainlink/core/utils"
+	ocrtypes "github.com/smartcontractkit/libocr/offchainreporting/types"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -27,6 +29,8 @@ import (
 	"github.com/smartcontractkit/chainlink/core/services/pipeline"
 	"github.com/smartcontractkit/chainlink/core/services/postgres"
 )
+
+var monitoringEndpoint = ocrtypes.MonitoringEndpoint(&telemetry.NoopAgent{})
 
 func TestRunner(t *testing.T) {
 	config, oldORM, cleanupDB := cltest.BootstrapThrowawayORM(t, "pipeline_runner", true, true)
@@ -345,7 +349,8 @@ ds1 -> ds1_parse;
 			nil,
 			nil,
 			nil,
-			nil)
+			nil,
+			monitoringEndpoint)
 		_, err = sd.ServicesForSpec(jb)
 		// We expect this to fail as neither the required vars are not set either via the env nor the job itself.
 		require.Error(t, err)
@@ -390,6 +395,7 @@ ds1 -> ds1_parse;
 			nil,
 			nil,
 			pw,
+			monitoringEndpoint,
 		)
 		_, err = sd.ServicesForSpec(jb)
 		require.NoError(t, err)
@@ -450,7 +456,8 @@ ds1 -> ds1_parse;
 			nil,
 			nil,
 			nil,
-			pw)
+			pw,
+			monitoringEndpoint)
 		_, err = sd.ServicesForSpec(jb)
 		require.NoError(t, err)
 	})
@@ -492,7 +499,8 @@ ds1 -> ds1_parse;
 			nil,
 			nil,
 			nil,
-			pw)
+			pw,
+			monitoringEndpoint)
 		_, err = sd.ServicesForSpec(jb)
 		require.NoError(t, err)
 	})
@@ -528,7 +536,8 @@ ds1 -> ds1_parse;
 			nil,
 			nil,
 			nil,
-			pw)
+			pw,
+			monitoringEndpoint)
 		_, err = sd.ServicesForSpec(jb)
 		require.NoError(t, err)
 	})
@@ -563,7 +572,8 @@ ds1 -> ds1_parse;
 			nil,
 			nil,
 			nil,
-			pw)
+			pw,
+			monitoringEndpoint)
 		services, err := sd.ServicesForSpec(jb)
 		require.NoError(t, err)
 
