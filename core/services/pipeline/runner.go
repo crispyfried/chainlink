@@ -220,8 +220,10 @@ func (r *runner) ExecuteTaskRuns(ctx context.Context, txdb *gorm.DB, run Run) Re
 
 	// 2. Fill in predecessor count and next, append firsts to work graph
 	for id, mtr := range all {
-		for _, mtr := range all {
-			if mtr.taskRun.PipelineTaskSpec.SuccessorID.ValueOrZero() == int64(id) {
+		for _, pred := range all {
+			if !pred.taskRun.PipelineTaskSpec.SuccessorID.IsZero() && pred.taskRun.PipelineTaskSpec.SuccessorID.ValueOrZero() == int64(id) {
+				fmt.Println("BALLS pred matched id", id)
+				fmt.Println("BALLS pred matched", mtr)
 				mtr.nPredecessors++
 			}
 		}
@@ -238,6 +240,11 @@ func (r *runner) ExecuteTaskRuns(ctx context.Context, txdb *gorm.DB, run Run) Re
 		}
 	}
 
+	fmt.Println("BALLS graph", graph)
+	for i, m := range graph {
+		fmt.Println("BALLS graph", i, *m)
+	}
+
 	// "fan in" job processing
 
 	var finalResult Result
@@ -248,6 +255,7 @@ func (r *runner) ExecuteTaskRuns(ctx context.Context, txdb *gorm.DB, run Run) Re
 		go func(m *memoryTaskRun) {
 			defer wg.Done()
 			for m != nil {
+				fmt.Println("BALLS run task", m.taskRun)
 				m.predMu.RLock()
 				nPredecessors := m.nPredecessors
 				inputs := m.inputs
@@ -344,15 +352,19 @@ func (r *runner) executeTaskRun(txdb *gorm.DB, taskRun TaskRun, inputs []Result)
 	// - Node level task timeout (JobPipelineMaxTaskDuration)
 	taskTimeout, isSet := task.TaskTimeout()
 	var ctx context.Context
-	var cancel context.CancelFunc
 	if isSet {
+		var cancel context.CancelFunc
 		ctx, cancel = utils.CombinedContext(r.chStop, taskTimeout)
 		defer cancel()
 	} else if spec.MaxTaskDuration != models.Interval(time.Duration(0)) {
+		var cancel context.CancelFunc
 		ctx, cancel = utils.CombinedContext(r.chStop, time.Duration(spec.MaxTaskDuration))
 		defer cancel()
+	} else {
+		ctx = context.Background()
 	}
 
+	fmt.Println("BALLS inputs", inputs)
 	result := task.Run(ctx, taskRun, inputs)
 	if _, is := result.Error.(FinalErrors); !is && result.Error != nil {
 		logger.Errorw("Pipeline task run errored", append(loggerFields, "error", result.Error)...)
