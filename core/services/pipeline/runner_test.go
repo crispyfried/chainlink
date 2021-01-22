@@ -43,7 +43,7 @@ func Test_PipelineRunner_ExecuteTaskRuns(t *testing.T) {
 
 	r := pipeline.NewRunner(orm, store.Config)
 
-	spec := pipeline.Spec{}
+	spec := pipeline.Spec{ID: 142}
 
 	// TODO: Add multiple paths
 	taskRuns := []pipeline.TaskRun{
@@ -110,6 +110,36 @@ func Test_PipelineRunner_ExecuteTaskRuns(t *testing.T) {
 			},
 		},
 		// 3. HTTP request, fails
+		pipeline.TaskRun{
+			ID: 41,
+			PipelineTaskSpec: pipeline.TaskSpec{
+				ID:          51,
+				DotID:       `ds3`,
+				Type:        "http",
+				JSON:        cltest.MustNewJSONSerializable(t, `{"method": "GET", "url": "http://test.invalid", "requestData": {"data": {"coin": "BTC", "market": "USD"}}}`),
+				SuccessorID: null.IntFrom(52),
+			},
+		},
+		pipeline.TaskRun{
+			ID: 42,
+			PipelineTaskSpec: pipeline.TaskSpec{
+				ID:          52,
+				DotID:       `ds3_parse`,
+				Type:        "jsonparse",
+				JSON:        cltest.MustNewJSONSerializable(t, `{"Lax": false, "path": ["data", "result"], "Timeout": 0}`),
+				SuccessorID: null.IntFrom(53),
+			},
+		},
+		pipeline.TaskRun{
+			ID: 43,
+			PipelineTaskSpec: pipeline.TaskSpec{
+				ID:          53,
+				DotID:       `ds3_multiply`,
+				Type:        "multiply",
+				JSON:        cltest.MustNewJSONSerializable(t, `{"times": "1000000000000000000", "Timeout": 0}`),
+				SuccessorID: null.IntFrom(102),
+			},
+		},
 		// MEDIAN
 		pipeline.TaskRun{
 			ID: 30,
@@ -117,7 +147,7 @@ func Test_PipelineRunner_ExecuteTaskRuns(t *testing.T) {
 				ID:          102,
 				DotID:       `median`,
 				Type:        "median",
-				JSON:        cltest.MustNewJSONSerializable(t, `{}`),
+				JSON:        cltest.MustNewJSONSerializable(t, `{"allowedFaults": 1}`),
 				SuccessorID: null.IntFrom(203),
 			},
 		},
@@ -134,6 +164,7 @@ func Test_PipelineRunner_ExecuteTaskRuns(t *testing.T) {
 	}
 
 	run := pipeline.Run{
+		ID:               242,
 		PipelineSpec:     spec,
 		PipelineTaskRuns: taskRuns,
 	}

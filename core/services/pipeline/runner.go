@@ -203,8 +203,7 @@ type memoryTaskRun struct {
 }
 
 func (r *runner) ExecuteTaskRuns(ctx context.Context, txdb *gorm.DB, run Run) Result {
-	// TODO: logger?
-	// logger.Infow("Running pipeline task", loggerFields...)
+	logger.Infow("Initiating tasks for pipeline run", "runID", run.ID)
 
 	// Find "firsts" and work forwards
 	// 1. Make map of all memory task runs keyed by task spec id
@@ -222,8 +221,6 @@ func (r *runner) ExecuteTaskRuns(ctx context.Context, txdb *gorm.DB, run Run) Re
 	for id, mtr := range all {
 		for _, pred := range all {
 			if !pred.taskRun.PipelineTaskSpec.SuccessorID.IsZero() && pred.taskRun.PipelineTaskSpec.SuccessorID.ValueOrZero() == int64(id) {
-				fmt.Println("BALLS pred matched id", id)
-				fmt.Println("BALLS pred matched", mtr)
 				mtr.nPredecessors++
 			}
 		}
@@ -240,12 +237,7 @@ func (r *runner) ExecuteTaskRuns(ctx context.Context, txdb *gorm.DB, run Run) Re
 		}
 	}
 
-	fmt.Println("BALLS graph", graph)
-	for i, m := range graph {
-		fmt.Println("BALLS graph", i, *m)
-	}
-
-	// "fan in" job processing
+	// 3. Execute tasks using "fan in" job processing
 
 	var finalResult Result
 	var wg sync.WaitGroup
@@ -255,7 +247,6 @@ func (r *runner) ExecuteTaskRuns(ctx context.Context, txdb *gorm.DB, run Run) Re
 		go func(m *memoryTaskRun) {
 			defer wg.Done()
 			for m != nil {
-				fmt.Println("BALLS run task", m.taskRun)
 				m.predMu.RLock()
 				nPredecessors := m.nPredecessors
 				inputs := m.inputs
@@ -292,7 +283,6 @@ func (r *runner) ExecuteTaskRuns(ctx context.Context, txdb *gorm.DB, run Run) Re
 				if finalErrors, is := result.Error.(FinalErrors); is {
 					errString = null.StringFrom(finalErrors.Error())
 				} else if result.Error != nil {
-					logger.Errorw("Error in pipeline task", "error", result.Error)
 					errString = null.StringFrom(result.Error.Error())
 				}
 				// TODO: As a further optimisation later we can consider pulling out these updates
@@ -320,6 +310,8 @@ func (r *runner) ExecuteTaskRuns(ctx context.Context, txdb *gorm.DB, run Run) Re
 	}
 
 	wg.Wait()
+
+	logger.Infow("Finished all tasks for pipeline run", "runID", run.ID)
 
 	return finalResult
 }
@@ -364,7 +356,6 @@ func (r *runner) executeTaskRun(txdb *gorm.DB, taskRun TaskRun, inputs []Result)
 		ctx = context.Background()
 	}
 
-	fmt.Println("BALLS inputs", inputs)
 	result := task.Run(ctx, taskRun, inputs)
 	if _, is := result.Error.(FinalErrors); !is && result.Error != nil {
 		logger.Errorw("Pipeline task run errored", append(loggerFields, "error", result.Error)...)
@@ -375,7 +366,7 @@ func (r *runner) executeTaskRun(txdb *gorm.DB, taskRun TaskRun, inputs []Result)
 			f = append(f, "resultString", fmt.Sprintf("%q", v))
 			f = append(f, "resultHex", fmt.Sprintf("%x", v))
 		}
-		logger.Infow("Pipeline task completed", f...)
+		logger.Debugw("Pipeline task completed", f...)
 	}
 
 	return result
