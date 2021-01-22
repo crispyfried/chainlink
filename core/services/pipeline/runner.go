@@ -15,7 +15,6 @@ import (
 	"github.com/smartcontractkit/chainlink/core/logger"
 	"github.com/smartcontractkit/chainlink/core/services/postgres"
 	"github.com/smartcontractkit/chainlink/core/utils"
-	"gopkg.in/guregu/null.v4"
 )
 
 type (
@@ -273,20 +272,8 @@ func (r *runner) ExecuteTaskRuns(ctx context.Context, txdb *gorm.DB, run Run) Re
 
 				result := r.executeTaskRun(txdb, m.taskRun, inputs)
 
-				// FIXME: Update here or batch the updates?
-				// Update the task run record with the output and error
-				var out interface{}
-				var errString null.String
-				if result.Value != nil {
-					out = &JSONSerializable{Val: result.Value}
-				}
-				if finalErrors, is := result.Error.(FinalErrors); is {
-					errString = null.StringFrom(finalErrors.Error())
-				} else if result.Error != nil {
-					errString = null.StringFrom(result.Error.Error())
-				}
 				// TODO: As a further optimisation later we can consider pulling out these updates
-				if err := txdb.Exec(`UPDATE pipeline_task_runs SET output = ?, error = ?, finished_at = ? WHERE id = ?`, out, errString, time.Now(), m.taskRun.ID).Error; err != nil {
+				if err := txdb.Exec(`UPDATE pipeline_task_runs SET output = ?, error = ?, finished_at = ? WHERE id = ?`, result.OutputsDB(), result.ErrorsDB(), time.Now(), m.taskRun.ID).Error; err != nil {
 					logger.Errorw("could not mark pipeline_task_run as finished", "err", err)
 				}
 

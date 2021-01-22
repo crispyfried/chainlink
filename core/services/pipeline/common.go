@@ -17,6 +17,7 @@ import (
 	"github.com/smartcontractkit/chainlink/core/logger"
 	"github.com/smartcontractkit/chainlink/core/store/models"
 	"github.com/smartcontractkit/chainlink/core/utils"
+	"gopkg.in/guregu/null.v4"
 )
 
 //go:generate mockery --name Config --output ./mocks/ --case=underscore
@@ -31,11 +32,6 @@ type (
 		OutputIndex() int32
 		TaskTimeout() (time.Duration, bool)
 		SetDefaults(inputValues map[string]string, g TaskDAG, self taskDAGNode) error
-	}
-
-	Result struct {
-		Value interface{}
-		Error error
 	}
 
 	Config interface {
@@ -58,6 +54,30 @@ var (
 	ErrWrongInputCardinality = errors.New("wrong number of task inputs")
 	ErrBadInput              = errors.New("bad input for task")
 )
+
+type Result struct {
+	Value interface{}
+	Error error
+}
+
+// TODO: Revisit whether this makes sense e.g. do we want literal nulls? Null strings?
+func (result Result) OutputsDB() interface{} {
+	var out interface{}
+	if result.Value != nil {
+		out = &JSONSerializable{Val: result.Value}
+	}
+	return out
+}
+
+func (result Result) ErrorsDB() null.String {
+	var errString null.String
+	if finalErrors, is := result.Error.(FinalErrors); is {
+		errString = null.StringFrom(finalErrors.Error())
+	} else if result.Error != nil {
+		errString = null.StringFrom(result.Error.Error())
+	}
+	return errString
+}
 
 type BaseTask struct {
 	outputTask Task

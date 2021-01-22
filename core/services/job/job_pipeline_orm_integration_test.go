@@ -2,6 +2,7 @@ package job_test
 
 import (
 	"context"
+	"fmt"
 	"net/url"
 	"testing"
 	"time"
@@ -26,8 +27,6 @@ func clearJobsDb(t *testing.T, db *gorm.DB) {
 }
 
 func TestPipelineORM_Integration(t *testing.T) {
-	t.Fatal("TODO")
-
 	config, oldORM, cleanupDB := cltest.BootstrapThrowawayORM(t, "pipeline_orm", true, true)
 	defer cleanupDB()
 	db := oldORM.DB
@@ -88,6 +87,8 @@ func TestPipelineORM_Integration(t *testing.T) {
 		})
 	}
 
+	fmt.Println("BALLS A")
+
 	t.Run("creates task DAGs", func(t *testing.T) {
 		orm, _, cleanup := cltest.NewPipelineORM(t, config, db)
 		defer cleanup()
@@ -135,6 +136,8 @@ func TestPipelineORM_Integration(t *testing.T) {
 
 		require.NoError(t, db.Exec(`DELETE FROM pipeline_specs`).Error)
 	})
+
+	fmt.Println("BALLS B")
 
 	var runID int64
 	t.Run("creates runs", func(t *testing.T) {
@@ -190,6 +193,8 @@ func TestPipelineORM_Integration(t *testing.T) {
 			require.True(t, taskRun.Error.IsZero())
 		}
 	})
+
+	fmt.Println("BALLS C")
 
 	t.Run("processes runs and awaits their completion", func(t *testing.T) {
 		tests := []struct {
@@ -250,11 +255,6 @@ func TestPipelineORM_Integration(t *testing.T) {
 				ORM := job.NewORM(db, config, orm, eventBroadcaster, &postgres.NullAdvisoryLocker{})
 				defer ORM.Close()
 
-				var (
-					taskRuns     = make(map[string]pipeline.TaskRun)
-					predecessors = make(map[string][]pipeline.TaskRun)
-				)
-
 				dbSpec := makeVoterTurnoutOCRJobSpec(t, db, transmitterAddress)
 
 				// Need a  in order to create a run
@@ -262,9 +262,10 @@ func TestPipelineORM_Integration(t *testing.T) {
 				require.NoError(t, err)
 
 				// Create two runs
+				// One will be processed, the other will be "locked" by another thread
 				runID, err = orm.CreateRun(context.Background(), dbSpec.ID, nil)
 				require.NoError(t, err)
-				_, err = orm.CreateRun(context.Background(), dbSpec.ID, nil)
+				runID2, err := orm.CreateRun(context.Background(), dbSpec.ID, nil)
 				require.NoError(t, err)
 
 				// Set up a goroutine to await the run's completion
@@ -272,6 +273,7 @@ func TestPipelineORM_Integration(t *testing.T) {
 				defer cancel()
 				chRunComplete := make(chan struct{})
 				go func() {
+					fmt.Println("BALLS await run")
 					err2 := orm.AwaitRun(ctx, runID)
 					require.NoError(t, err2)
 					close(chRunComplete)
@@ -279,105 +281,58 @@ func TestPipelineORM_Integration(t *testing.T) {
 
 				// First, "claim" one of the runs to ensure that `ProcessNextUnfinishedRun` doesn't return it
 				var (
-					chClaimed  = make(chan struct{})
-					chBlock    = make(chan struct{})
-					chUnlocked = make(chan struct{})
-					locked     pipeline.TaskRun
+					chClaimed = make(chan struct{})
+					chBlock   = make(chan struct{})
+					locked    pipeline.Run
 				)
+				// Allow the extra run to be deleted
+				fmt.Println("BALLS 0")
+				defer close(chBlock)
 				go func() {
 					err2 := postgres.GormTransaction(context.Background(), db, func(tx *gorm.DB) error {
-						err2 := tx.Raw(`
-                            SELECT * FROM pipeline_task_runs
-                            INNER JOIN pipeline_task_specs on pipeline_task_runs.pipeline_task_spec_id = pipeline_task_specs.id
-                            WHERE pipeline_task_specs.type = 'result'
-                            FOR UPDATE OF pipeline_task_runs
-                        `).Scan(&locked).Error
-						require.NoError(t, err2)
+						err2 := tx.Exec(`
+							DELETE FROM pipeline_runs
+							WHERE id = ?
+                        `, runID2).Error
+						assert.NoError(t, err2)
 
 						close(chClaimed)
-						<-chBlock
+						select {
+						case <-chBlock:
+						case <-time.After(30 * time.Second):
+							t.Fatal("timed out unblocking")
+						}
 						return nil
 					})
 					require.NoError(t, err2)
-					close(chUnlocked)
 				}()
+				fmt.Println("BALLS 1")
 				<-chClaimed
+				fmt.Println("BALLS 2")
 
 				// Process the run
+
 				{
-					anyRemaining := true
-					for anyRemaining {
-						anyRemaining, err = orm.ProcessNextUnfinishedRun(context.Background(), func(_ context.Context, db *gorm.DB, run pipeline.Run) pipeline.Result {
-							// Ensure we don't fetch the locked task run
-							require.NotEqual(t, locked.ID, taskRun.ID)
+					anyRemaining, err := orm.ProcessNextUnfinishedRun(context.Background(), func(_ context.Context, db *gorm.DB, run pipeline.Run) pipeline.Result {
+						// Ensure we don't fetch the locked task run
+						require.NotEqual(t, locked.ID, run.ID)
 
-							// Ensure the predecessors' answers match what we expect
-							for _, p := range predecessorRuns {
-								_, exists := test.answers[p.DotID()]
-								require.True(t, exists)
-								require.True(t, p.Output != nil || !p.Error.IsZero())
-								if p.Output != nil {
-									require.Equal(t, test.answers[p.DotID()].Value, p.Output.Val)
-								} else if !p.Error.IsZero() {
-									require.Equal(t, test.answers[p.DotID()].Error.Error(), p.Error.ValueOrZero())
-								}
-							}
-
-							taskRuns[taskRun.DotID()] = taskRun
-							predecessors[taskRun.DotID()] = predecessorRuns
-							return test.answers[taskRun.DotID()]
-						})
-						require.NoError(t, err)
-					}
-				}
-
-				// Ensure the run isn't considered complete yet
-				{
-					time.Sleep(5 * time.Second)
-					require.Len(t, taskRuns, len(expectedTasks)-1)
-					select {
-					case <-chRunComplete:
-						t.Fatal("run completed too early")
-					default:
-					}
-				}
-
-				// Now, release the claim and make sure we can process the final task run
-				{
-					close(chBlock)
-					<-chUnlocked
-					time.Sleep(3 * time.Second)
-
-					anyRemaining, err2 := orm.ProcessNextUnfinishedRun(context.Background(), func(_ context.Context, db *gorm.DB, jobID int32, taskRun pipeline.TaskRun, predecessorRuns []pipeline.TaskRun) pipeline.Result {
-						// Ensure the predecessors' answers match what we expect
-						for _, p := range predecessorRuns {
-							_, exists := test.answers[p.DotID()]
-							require.True(t, exists)
-							require.True(t, p.Output != nil || !p.Error.IsZero())
-							if p.Output != nil {
-								require.Equal(t, test.answers[p.DotID()].Value, p.Output.Val)
-							} else if !p.Error.IsZero() {
-								require.Equal(t, test.answers[p.DotID()].Error.Error(), p.Error.ValueOrZero())
-							}
-						}
-
-						taskRuns[taskRun.DotID()] = taskRun
-						predecessors[taskRun.DotID()] = predecessorRuns
-						return test.answers[taskRun.DotID()]
+						return test.answers["__result__"]
 					})
-					require.NoError(t, err2)
+					require.NoError(t, err)
 					require.True(t, anyRemaining)
 				}
 
 				// Ensure that the ORM doesn't think there are more runs
 				{
-					anyRemaining, err2 := orm.ProcessNextUnfinishedRun(context.Background(), func(_ context.Context, db *gorm.DB, jobID int32, taskRun pipeline.TaskRun, predecessorRuns []pipeline.TaskRun) pipeline.Result {
+					anyRemaining, err2 := orm.ProcessNextUnfinishedRun(context.Background(), func(_ context.Context, db *gorm.DB, run pipeline.Run) pipeline.Result {
 						t.Fatal("this callback should never be reached")
 						return pipeline.Result{}
 					})
 					require.NoError(t, err2)
 					require.False(t, anyRemaining)
 				}
+				fmt.Println("BALLS 3")
 
 				// Ensure that the run is now considered complete
 				{
@@ -387,12 +342,12 @@ func TestPipelineORM_Integration(t *testing.T) {
 					case <-chRunComplete:
 					}
 
-					var finishedRuns []pipeline.TaskRun
-					err = db.Preload("PipelineTaskSpec").Find(&finishedRuns).Error
+					var finishedTaskRuns []pipeline.TaskRun
+					err = db.Preload("PipelineTaskSpec").Find(&finishedTaskRuns, "pipeline_run_id = ?", runID).Error
 					require.NoError(t, err)
-					require.Len(t, finishedRuns, len(expectedTasks))
+					require.Len(t, finishedTaskRuns, len(expectedTasks))
 
-					for _, run := range finishedRuns {
+					for _, run := range finishedTaskRuns {
 						require.True(t, run.Output != nil || !run.Error.IsZero())
 						if run.Output != nil {
 							require.Equal(t, test.answers[run.DotID()].Value, run.Output.Val)
@@ -408,6 +363,7 @@ func TestPipelineORM_Integration(t *testing.T) {
 					assert.NotNil(t, pipelineRun.Errors.Val)
 					assert.NotNil(t, pipelineRun.Outputs.Val)
 				}
+				fmt.Println("BALLS 4")
 
 				// Ensure that we can retrieve the correct results by calling .ResultsForRun
 				results, err := orm.ResultsForRun(context.Background(), runID)
@@ -425,6 +381,8 @@ func TestPipelineORM_Integration(t *testing.T) {
 				} else {
 					require.Equal(t, test.answers["answer2"].Error.Error(), results[1].Error.Error())
 				}
+
+				fmt.Println("BALLS 5")
 			})
 		}
 	})

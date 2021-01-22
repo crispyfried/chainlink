@@ -215,7 +215,7 @@ func (o *orm) processNextUnfinishedRun(ctx context.Context, fn ProcessRunFunc) e
 		result := fn(ctx, tx, pRun)
 
 		// TODO: Check that the following update actually works
-		err = tx.Exec(`UPDATE pipeline_runs SET finished_at = ?, outputs = ?, errors = ? WHERE id = ?`, time.Now(), result.Value, result.Error, pRun.ID).Error
+		err = tx.Exec(`UPDATE pipeline_runs SET finished_at = ?, outputs = ?, errors = ? WHERE id = ?`, time.Now(), result.OutputsDB(), result.ErrorsDB(), pRun.ID).Error
 		if err != nil {
 			return errors.Wrap(err, "could not mark pipeline_run as finished")
 		}
@@ -358,6 +358,7 @@ func (o *orm) ResultsForRun(ctx context.Context, runID int64) ([]Result, error) 
 
 func (o *orm) RunFinished(runID int64) (bool, error) {
 	var done struct{ Done bool }
+	// FIXME: Since we denormalised this can be made more efficient
 	err := o.db.Raw(`
         SELECT finished_at IS NOT NULL AS done
         FROM pipeline_task_runs
