@@ -1606,3 +1606,12 @@ func MustNewKeyedTransactor(t *testing.T, key *ecdsa.PrivateKey, chainID int64) 
 
 	return transactor
 }
+
+func MustNewJSONSerializable(t *testing.T, s string) pipeline.JSONSerializable {
+	t.Helper()
+
+	js := new(pipeline.JSONSerializable)
+	err := js.UnmarshalJSON([]byte(s))
+	require.NoError(t, err)
+	return *js
+}

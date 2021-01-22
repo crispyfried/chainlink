@@ -26,6 +26,8 @@ func clearJobsDb(t *testing.T, db *gorm.DB) {
 }
 
 func TestPipelineORM_Integration(t *testing.T) {
+	t.Fatal("TODO")
+
 	config, oldORM, cleanupDB := cltest.BootstrapThrowawayORM(t, "pipeline_orm", true, true)
 	defer cleanupDB()
 	db := oldORM.DB
@@ -259,8 +261,10 @@ func TestPipelineORM_Integration(t *testing.T) {
 				err := ORM.CreateJob(context.Background(), dbSpec, dbSpec.Pipeline)
 				require.NoError(t, err)
 
-				// Create the run
+				// Create two runs
 				runID, err = orm.CreateRun(context.Background(), dbSpec.ID, nil)
+				require.NoError(t, err)
+				_, err = orm.CreateRun(context.Background(), dbSpec.ID, nil)
 				require.NoError(t, err)
 
 				// Set up a goroutine to await the run's completion
@@ -273,7 +277,7 @@ func TestPipelineORM_Integration(t *testing.T) {
 					close(chRunComplete)
 				}()
 
-				// First, "claim" one of the output task runs to ensure that `ProcessNextUnclaimedTaskRun` doesn't return it
+				// First, "claim" one of the runs to ensure that `ProcessNextUnfinishedRun` doesn't return it
 				var (
 					chClaimed  = make(chan struct{})
 					chBlock    = make(chan struct{})
@@ -299,11 +303,11 @@ func TestPipelineORM_Integration(t *testing.T) {
 				}()
 				<-chClaimed
 
-				// Process all of the unclaimed task runs
+				// Process the run
 				{
 					anyRemaining := true
 					for anyRemaining {
-						anyRemaining, err = orm.ProcessNextUnclaimedTaskRun(context.Background(), func(_ context.Context, db *gorm.DB, jobID int32, taskRun pipeline.TaskRun, predecessorRuns []pipeline.TaskRun) pipeline.Result {
+						anyRemaining, err = orm.ProcessNextUnfinishedRun(context.Background(), func(_ context.Context, db *gorm.DB, run pipeline.Run) pipeline.Result {
 							// Ensure we don't fetch the locked task run
 							require.NotEqual(t, locked.ID, taskRun.ID)
 
@@ -344,7 +348,7 @@ func TestPipelineORM_Integration(t *testing.T) {
 					<-chUnlocked
 					time.Sleep(3 * time.Second)
 
-					anyRemaining, err2 := orm.ProcessNextUnclaimedTaskRun(context.Background(), func(_ context.Context, db *gorm.DB, jobID int32, taskRun pipeline.TaskRun, predecessorRuns []pipeline.TaskRun) pipeline.Result {
+					anyRemaining, err2 := orm.ProcessNextUnfinishedRun(context.Background(), func(_ context.Context, db *gorm.DB, jobID int32, taskRun pipeline.TaskRun, predecessorRuns []pipeline.TaskRun) pipeline.Result {
 						// Ensure the predecessors' answers match what we expect
 						for _, p := range predecessorRuns {
 							_, exists := test.answers[p.DotID()]
@@ -367,7 +371,7 @@ func TestPipelineORM_Integration(t *testing.T) {
 
 				// Ensure that the ORM doesn't think there are more runs
 				{
-					anyRemaining, err2 := orm.ProcessNextUnclaimedTaskRun(context.Background(), func(_ context.Context, db *gorm.DB, jobID int32, taskRun pipeline.TaskRun, predecessorRuns []pipeline.TaskRun) pipeline.Result {
+					anyRemaining, err2 := orm.ProcessNextUnfinishedRun(context.Background(), func(_ context.Context, db *gorm.DB, jobID int32, taskRun pipeline.TaskRun, predecessorRuns []pipeline.TaskRun) pipeline.Result {
 						t.Fatal("this callback should never be reached")
 						return pipeline.Result{}
 					})

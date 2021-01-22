@@ -15,6 +15,7 @@ import (
 	"github.com/smartcontractkit/chainlink/core/logger"
 	"github.com/smartcontractkit/chainlink/core/services/postgres"
 	"github.com/smartcontractkit/chainlink/core/utils"
+	"gopkg.in/guregu/null.v4"
 )
 
 type (
@@ -58,7 +59,7 @@ func NewRunner(orm ORM, config Config) *runner {
 		chDone: make(chan struct{}),
 	}
 	r.processIncompleteTaskRunsWorker = utils.NewSleeperTask(
-		utils.SleeperTaskFuncWorker(r.processIncompleteTaskRuns),
+		utils.SleeperTaskFuncWorker(r.processUnfinishedRuns),
 	)
 	r.runReaperWorker = utils.NewSleeperTask(
 		utils.SleeperTaskFuncWorker(r.runReaper),
@@ -152,7 +153,8 @@ func (r *runner) ResultsForRun(ctx context.Context, runID int64) ([]Result, erro
 
 // NOTE: This could potentially run on a different machine in the cluster than
 // the one that originally added the task runs.
-func (r *runner) processIncompleteTaskRuns() {
+// TODO: Fix naming everywhere
+func (r *runner) processUnfinishedRuns() {
 	threads := int(r.config.JobPipelineParallelism())
 
 	var wg sync.WaitGroup
@@ -168,7 +170,7 @@ func (r *runner) processIncompleteTaskRuns() {
 				default:
 				}
 
-				anyRemaining, err := r.processTaskRun()
+				anyRemaining, err := r.processRun()
 				if err != nil {
 					logger.Errorf("Error processing incomplete task runs: %v", err)
 					return
@@ -181,76 +183,190 @@ func (r *runner) processIncompleteTaskRuns() {
 	wg.Wait()
 }
 
-func (r *runner) processTaskRun() (anyRemaining bool, err error) {
+func (r *runner) processRun() (anyRemaining bool, err error) {
 	ctx, cancel := utils.CombinedContext(r.chStop, r.config.JobPipelineMaxTaskDuration())
 	defer cancel()
 
-	return r.orm.ProcessNextUnclaimedTaskRun(ctx, func(ctx context.Context, txdb *gorm.DB, jobID int32, taskRun TaskRun, predecessors []TaskRun) Result {
-		loggerFields := []interface{}{
-			"jobID", jobID,
-			"taskName", taskRun.PipelineTaskSpec.DotID,
-			"taskID", taskRun.PipelineTaskSpecID,
-			"runID", taskRun.PipelineRunID,
-			"taskRunID", taskRun.ID,
-		}
-
-		start := time.Now()
-
-		logger.Infow("Running pipeline task", loggerFields...)
-
-		inputs := make([]Result, len(predecessors))
-		for i, predecessor := range predecessors {
-			inputs[i] = predecessor.Result()
-		}
-
-		task, err := UnmarshalTaskFromMap(
-			taskRun.PipelineTaskSpec.Type,
-			taskRun.PipelineTaskSpec.JSON.Val,
-			taskRun.PipelineTaskSpec.DotID,
-			r.config,
-			txdb,
-		)
-		if err != nil {
-			logger.Errorw("Pipeline task run could not be unmarshaled", append(loggerFields, "error", err)...)
-			return Result{Error: err}
-		}
-		var spec Spec
-		err = txdb.Find(&spec, "id = ?", taskRun.PipelineRun.PipelineSpecID).Error
-		if err != nil {
-			return Result{Error: errors.Wrap(err, "unexpected error could not find pipeline spec by ID")}
-		}
-
-		// Order of precedence for task timeout:
-		// - Specific task timeout (task.TaskTimeout)
-		// - Job level task timeout (spec.MaxTaskDuration)
-		// - Node level task timeout (JobPipelineMaxTaskDuration)
-		taskTimeout, isSet := task.TaskTimeout()
-		if isSet {
-			ctx, cancel = utils.CombinedContext(r.chStop, taskTimeout)
-			defer cancel()
-		} else if spec.MaxTaskDuration != models.Interval(time.Duration(0)) {
-			ctx, cancel = utils.CombinedContext(r.chStop, time.Duration(spec.MaxTaskDuration))
-			defer cancel()
-		}
-
-		result := task.Run(ctx, taskRun, inputs)
-		if _, is := result.Error.(FinalErrors); !is && result.Error != nil {
-			logger.Errorw("Pipeline task run errored", append(loggerFields, "error", result.Error)...)
-		} else {
-			f := append(loggerFields, "result", result.Value)
-			switch v := result.Value.(type) {
-			case []byte:
-				f = append(f, "resultString", fmt.Sprintf("%q", v))
-				f = append(f, "resultHex", fmt.Sprintf("%x", v))
-			}
-			logger.Infow("Pipeline task completed", f...)
-		}
-
-		elapsed := time.Since(start)
-		promPipelineTaskExecutionTime.WithLabelValues(string(taskRun.PipelineTaskSpec.PipelineSpecID), string(taskRun.PipelineTaskSpec.Type)).Set(float64(elapsed))
-
-		return result
+	return r.orm.ProcessNextUnfinishedRun(ctx, func(ctx context.Context, txdb *gorm.DB, run Run) Result {
+		return r.ExecuteTaskRuns(ctx, txdb, run)
 	})
+}
+
+type memoryTaskRun struct {
+	taskRun       TaskRun
+	next          *memoryTaskRun
+	nPredecessors int
+	finished      bool
+	inputs        []Result
+	predMu        sync.RWMutex
+	finishMu      sync.Mutex
+}
+
+func (r *runner) ExecuteTaskRuns(ctx context.Context, txdb *gorm.DB, run Run) Result {
+	// TODO: logger?
+	// logger.Infow("Running pipeline task", loggerFields...)
+
+	// Find "firsts" and work forwards
+	// 1. Make map of all memory task runs keyed by task spec id
+	all := make(map[int32]*memoryTaskRun)
+	for _, tr := range run.PipelineTaskRuns {
+		mtr := memoryTaskRun{
+			taskRun: tr,
+		}
+		all[tr.PipelineTaskSpec.ID] = &mtr
+	}
+
+	var graph []*memoryTaskRun
+
+	// 2. Fill in predecessor count and next, append firsts to work graph
+	for id, mtr := range all {
+		for _, mtr := range all {
+			if mtr.taskRun.PipelineTaskSpec.SuccessorID.ValueOrZero() == int64(id) {
+				mtr.nPredecessors++
+			}
+		}
+
+		if mtr.taskRun.PipelineTaskSpec.SuccessorID.IsZero() {
+			mtr.next = nil
+		} else {
+			mtr.next = all[int32(mtr.taskRun.PipelineTaskSpec.SuccessorID.ValueOrZero())]
+		}
+
+		if mtr.nPredecessors == 0 {
+			// No predecessors so this is the first one
+			graph = append(graph, mtr)
+		}
+	}
+
+	// "fan in" job processing
+
+	var finalResult Result
+	var wg sync.WaitGroup
+	wg.Add(len(graph))
+
+	for _, mtr := range graph {
+		go func(m *memoryTaskRun) {
+			defer wg.Done()
+			for m != nil {
+				m.predMu.RLock()
+				nPredecessors := m.nPredecessors
+				inputs := m.inputs
+				m.predMu.RUnlock()
+				if nPredecessors > 0 {
+					// This one is still waiting another chain, abandon this
+					// goroutine and let the other handle it
+					return
+				}
+
+				var finished bool
+
+				// Avoid double execution, only one goroutine may finish the task
+				m.finishMu.Lock()
+				finished = m.finished
+				if finished {
+					m.finishMu.Unlock()
+					return
+				}
+				m.finished = true
+				m.finishMu.Unlock()
+
+				start := time.Now()
+
+				result := r.executeTaskRun(txdb, m.taskRun, inputs)
+
+				// FIXME: Update here or batch the updates?
+				// Update the task run record with the output and error
+				var out interface{}
+				var errString null.String
+				if result.Value != nil {
+					out = &JSONSerializable{Val: result.Value}
+				}
+				if finalErrors, is := result.Error.(FinalErrors); is {
+					errString = null.StringFrom(finalErrors.Error())
+				} else if result.Error != nil {
+					logger.Errorw("Error in pipeline task", "error", result.Error)
+					errString = null.StringFrom(result.Error.Error())
+				}
+				// TODO: As a further optimisation later we can consider pulling out these updates
+				if err := txdb.Exec(`UPDATE pipeline_task_runs SET output = ?, error = ?, finished_at = ? WHERE id = ?`, out, errString, time.Now(), m.taskRun.ID).Error; err != nil {
+					logger.Errorw("could not mark pipeline_task_run as finished", "err", err)
+				}
+
+				elapsed := time.Since(start)
+				promPipelineTaskExecutionTime.WithLabelValues(string(m.taskRun.PipelineTaskSpec.PipelineSpecID), string(m.taskRun.PipelineTaskSpec.Type)).Set(float64(elapsed))
+
+				if m.next == nil {
+					finalResult = result
+					return
+				}
+
+				m.next.predMu.Lock()
+				m.next.inputs = append(m.next.inputs, result)
+				m.next.nPredecessors--
+				m.next.predMu.Unlock()
+
+				m = m.next
+			}
+
+		}(mtr)
+	}
+
+	wg.Wait()
+
+	return finalResult
+}
+
+func (r *runner) executeTaskRun(txdb *gorm.DB, taskRun TaskRun, inputs []Result) Result {
+	loggerFields := []interface{}{
+		"taskName", taskRun.PipelineTaskSpec.DotID,
+		"taskID", taskRun.PipelineTaskSpecID,
+		"runID", taskRun.PipelineRunID,
+		"taskRunID", taskRun.ID,
+	}
+
+	task, err := UnmarshalTaskFromMap(
+		taskRun.PipelineTaskSpec.Type,
+		taskRun.PipelineTaskSpec.JSON.Val,
+		taskRun.PipelineTaskSpec.DotID,
+		r.config,
+		txdb,
+	)
+	if err != nil {
+		logger.Errorw("Pipeline task run could not be unmarshaled", append(loggerFields, "error", err)...)
+		return Result{Error: err}
+	}
+
+	spec := taskRun.PipelineTaskSpec.PipelineSpec
+
+	// Order of precedence for task timeout:
+	// - Specific task timeout (task.TaskTimeout)
+	// - Job level task timeout (spec.MaxTaskDuration)
+	// - Node level task timeout (JobPipelineMaxTaskDuration)
+	taskTimeout, isSet := task.TaskTimeout()
+	var ctx context.Context
+	var cancel context.CancelFunc
+	if isSet {
+		ctx, cancel = utils.CombinedContext(r.chStop, taskTimeout)
+		defer cancel()
+	} else if spec.MaxTaskDuration != models.Interval(time.Duration(0)) {
+		ctx, cancel = utils.CombinedContext(r.chStop, time.Duration(spec.MaxTaskDuration))
+		defer cancel()
+	}
+
+	result := task.Run(ctx, taskRun, inputs)
+	if _, is := result.Error.(FinalErrors); !is && result.Error != nil {
+		logger.Errorw("Pipeline task run errored", append(loggerFields, "error", result.Error)...)
+	} else {
+		f := append(loggerFields, "result", result.Value)
+		switch v := result.Value.(type) {
+		case []byte:
+			f = append(f, "resultString", fmt.Sprintf("%q", v))
+			f = append(f, "resultHex", fmt.Sprintf("%x", v))
+		}
+		logger.Infow("Pipeline task completed", f...)
+	}
+
+	return result
 }
 
 func (r *runner) runReaper() {

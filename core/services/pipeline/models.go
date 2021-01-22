@@ -23,6 +23,7 @@ type (
 		ID             int32            `json:"-" gorm:"primary_key"`
 		DotID          string           `json:"dotId"`
 		PipelineSpecID int32            `json:"-"`
+		PipelineSpec   Spec             `json:"-"`
 		Type           TaskType         `json:"-"`
 		JSON           JSONSerializable `json:"-" gorm:"type:jsonb"`
 		Index          int32            `json:"-"`
